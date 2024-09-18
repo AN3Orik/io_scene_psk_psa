@@ -61,6 +61,7 @@ def import_psk(psk: Psk, context, options: PskImportOptions) -> PskImportResult:
         armature_data = bpy.data.armatures.new(options.name)
         armature_object = bpy.data.objects.new(options.name, armature_data)
         armature_object.show_in_front = True
+        armature_object.name = 'Armature'
 
         context.scene.collection.objects.link(armature_object)
 
