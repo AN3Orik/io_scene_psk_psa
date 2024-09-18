@@ -299,6 +299,8 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
             fcurve_data = np.zeros(2 * target_frame_count, dtype=float)
             fcurve_data[0::2] = range(0, target_frame_count)
 
+            # print('Seq name=' + sequence_name + ' frames=' + str(target_frame_count))
+            
             for bone_index, import_bone in enumerate(import_bones):
                 if import_bone is None:
                     continue
@@ -334,12 +336,14 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
             nla_track = armature_object.animation_data.nla_tracks.new()
             nla_track.name = 'AIO'
             
-            allFrames = 0
+            currentFrame = 0
             for action in actions:
-                strip = nla_track.strips.new(name=action.name, start=int(allFrames), action=action)
+                # print('Current frame: ' + str(currentFrame))
+                strip = nla_track.strips.new(name=action.name, start=int(currentFrame), action=action)
                 strip.extrapolation = 'NOTHING'
-                allFrames = allFrames + action.frame_range.y
-            context.scene.frame_end = int(allFrames)
+                # Action must be has minimum 1 frame for proper adding to timeline
+                currentFrame = currentFrame + max(1, action.frame_range.y)
+            context.scene.frame_end = int(currentFrame)
         else:
             for action in actions:
                 nla_track = armature_object.animation_data.nla_tracks.new()
