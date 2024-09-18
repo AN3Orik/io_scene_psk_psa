@@ -41,6 +41,9 @@ class PSA_PG_import(PropertyGroup):
     should_stash: BoolProperty(default=False, name='Stash',
                                description='Stash each imported action as a strip on a new non-contributing NLA track',
                                options=empty_set)
+    stash_one_track: BoolProperty(default=False, name='Stash to one track',
+                               description='Use single NLA track for stashing',
+                               options=empty_set)
     should_use_action_name_prefix: BoolProperty(default=False, name='Prefix Action Name', options=empty_set)
     action_name_prefix: StringProperty(default='', name='Prefix', options=empty_set)
     should_overwrite: BoolProperty(default=False, name='Overwrite', options=empty_set,

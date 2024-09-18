@@ -173,6 +173,7 @@ def _import_psa(context,
     options.sequence_names = sequence_names
     options.should_use_fake_user = pg.should_use_fake_user
     options.should_stash = pg.should_stash
+    options.stash_one_track = pg.stash_one_track
     options.action_name_prefix = pg.action_name_prefix if pg.should_use_action_name_prefix else ''
     options.should_overwrite = pg.should_overwrite
     options.should_write_metadata = pg.should_write_metadata
@@ -325,6 +326,7 @@ class PSA_OT_import(Operator, ImportHelper):
             col.use_property_decorate = False
             col.prop(pg, 'should_use_fake_user')
             col.prop(pg, 'should_stash')
+            col.prop(pg, 'stash_one_track')
             col.prop(pg, 'should_use_config_file')
 
 
@@ -363,6 +365,7 @@ def draw_psa_import_options_no_panels(layout, pg):
     col.use_property_decorate = False
     col.prop(pg, 'should_use_fake_user')
     col.prop(pg, 'should_stash')
+    col.prop(pg, 'stash_one_track')
     col.prop(pg, 'should_use_config_file')
 
 

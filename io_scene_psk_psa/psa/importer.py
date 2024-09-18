@@ -15,6 +15,7 @@ class PsaImportOptions(object):
     def __init__(self):
         self.should_use_fake_user = False
         self.should_stash = False
+        self.stash_one_track = False
         self.sequence_names = []
         self.should_overwrite = False
         self.should_write_keyframes = True
@@ -329,11 +330,22 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
     if options.should_stash:
         if armature_object.animation_data is None:
             armature_object.animation_data_create()
-        for action in actions:
+        if options.stash_one_track:
             nla_track = armature_object.animation_data.nla_tracks.new()
-            nla_track.name = action.name
-            nla_track.mute = True
-            nla_track.strips.new(name=action.name, start=0, action=action)
+            nla_track.name = 'AIO'
+            
+            allFrames = 0
+            for action in actions:
+                strip = nla_track.strips.new(name=action.name, start=int(allFrames), action=action)
+                strip.extrapolation = 'NOTHING'
+                allFrames = allFrames + action.frame_range.y
+            context.scene.frame_end = int(allFrames)
+        else:
+            for action in actions:
+                nla_track = armature_object.animation_data.nla_tracks.new()
+                nla_track.name = action.name
+                nla_track.mute = True
+                nla_track.strips.new(name=action.name, start=0, action=action)
 
     context.window_manager.progress_end()
 

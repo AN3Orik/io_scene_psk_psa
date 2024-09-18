@@ -1,9 +1,16 @@
 import os
 import sys
+import bpy
+from pathlib import Path
 
-from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatProperty
 from bpy.types import Operator, FileHandler, Context
 from bpy_extras.io_utils import ImportHelper
+
+from bpy.props import (BoolProperty,
+                       FloatProperty,
+                       StringProperty,
+                       EnumProperty,
+                       CollectionProperty)
 
 from ..importer import PskImportOptions, import_psk
 from ..reader import read_psk
@@ -30,11 +37,7 @@ class PSK_OT_import(Operator, ImportHelper):
     bl_description = 'Import a PSK file'
     filename_ext = '.psk'
     filter_glob: StringProperty(default='*.psk;*.pskx', options={'HIDDEN'})
-    filepath: StringProperty(
-        name='File Path',
-        description='File path used for exporting the PSK file',
-        maxlen=1024,
-        default='')
+    files: CollectionProperty(type=bpy.types.PropertyGroup)
 
     should_import_vertex_colors: BoolProperty(
         default=True,
@@ -110,36 +113,39 @@ class PSK_OT_import(Operator, ImportHelper):
     )
 
     def execute(self, context):
-        psk = read_psk(self.filepath)
+        folder = Path(self.filepath)
+        for selection in self.files:
+            fp = Path(folder.parent, selection.name)
+            psk = read_psk(fp)
 
-        options = PskImportOptions()
-        options.name = os.path.splitext(os.path.basename(self.filepath))[0]
-        options.should_import_mesh = self.should_import_mesh
-        options.should_import_extra_uvs = self.should_import_extra_uvs
-        options.should_import_vertex_colors = self.should_import_vertex_colors
-        options.should_import_vertex_normals = self.should_import_vertex_normals
-        options.vertex_color_space = self.vertex_color_space
-        options.should_import_skeleton = self.should_import_skeleton
-        options.bone_length = self.bone_length
-        options.should_import_materials = self.should_import_materials
-        options.should_import_shape_keys = self.should_import_shape_keys
-        options.scale = self.scale
+            options = PskImportOptions()
+            options.name = os.path.splitext(selection.name)[0]
+            options.should_import_mesh = self.should_import_mesh
+            options.should_import_extra_uvs = self.should_import_extra_uvs
+            options.should_import_vertex_colors = self.should_import_vertex_colors
+            options.should_import_vertex_normals = self.should_import_vertex_normals
+            options.vertex_color_space = self.vertex_color_space
+            options.should_import_skeleton = self.should_import_skeleton
+            options.bone_length = self.bone_length
+            options.should_import_materials = self.should_import_materials
+            options.should_import_shape_keys = self.should_import_shape_keys
+            options.scale = self.scale
 
-        if self.bdk_repository_id:
-            options.bdk_repository_id = self.bdk_repository_id
+            if self.bdk_repository_id:
+                options.bdk_repository_id = self.bdk_repository_id
 
-        if not options.should_import_mesh and not options.should_import_skeleton:
-            self.report({'ERROR'}, 'Nothing to import')
-            return {'CANCELLED'}
+            if not options.should_import_mesh and not options.should_import_skeleton:
+                self.report({'ERROR'}, 'Nothing to import')
+                return {'CANCELLED'}
 
-        result = import_psk(psk, context, options)
+            result = import_psk(psk, context, options)
 
-        if len(result.warnings):
-            message = f'PSK imported with {len(result.warnings)} warning(s)\n'
-            message += '\n'.join(result.warnings)
-            self.report({'WARNING'}, message)
-        else:
-            self.report({'INFO'}, f'PSK imported ({options.name})')
+            if len(result.warnings):
+                message = f'PSK imported with {len(result.warnings)} warning(s)\n'
+                message += '\n'.join(result.warnings)
+                self.report({'WARNING'}, message)
+            else:
+                self.report({'INFO'}, f'PSK imported ({options.name})')
 
         return {'FINISHED'}
 
