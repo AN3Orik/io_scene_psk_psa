@@ -1,18 +1,20 @@
+import typing
 from typing import Optional
 
 import bmesh
-import bpy
 import numpy as np
-from bpy.types import Armature, Material, Collection, Context
+from bpy.types import Material, Collection, Context
+from mathutils import Matrix, Vector
 
 from .data import *
 from .properties import triangle_type_and_bit_flags_to_poly_flags
+from ..shared.dfs import dfs_collection_objects, dfs_view_layer_objects, DfsObject
 from ..shared.helpers import *
 
 
 class PskInputObjects(object):
     def __init__(self):
-        self.mesh_objects = []
+        self.mesh_objects: List[DfsObject] = []
         self.armature_object: Optional[Object] = None
 
 
@@ -22,25 +24,51 @@ class PskBuildOptions(object):
         self.bone_collection_indices: List[int] = []
         self.object_eval_state = 'EVALUATED'
         self.materials: List[Material] = []
-        self.should_enforce_bone_name_restrictions = False
+        self.scale = 1.0
+        self.export_space = 'WORLD'
+        self.forward_axis = 'X'
+        self.up_axis = 'Z'
 
 
-def get_mesh_objects_for_collection(collection: Collection, should_exclude_hidden_meshes: bool = True):
-    for obj in collection.all_objects:
-        if obj.type != 'MESH':
-            continue
-        if should_exclude_hidden_meshes and obj.visible_get() is False:
-            continue
-        yield obj
+def get_vector_from_axis_identifier(axis_identifier: str) -> Vector:
+    match axis_identifier:
+        case 'X':
+            return Vector((1.0, 0.0, 0.0))
+        case 'Y':
+            return Vector((0.0, 1.0, 0.0))
+        case 'Z':
+            return Vector((0.0, 0.0, 1.0))
+        case '-X':
+            return Vector((-1.0, 0.0, 0.0))
+        case '-Y':
+            return Vector((0.0, -1.0, 0.0))
+        case '-Z':
+            return Vector((0.0, 0.0, -1.0))
 
 
-def get_mesh_objects_for_context(context: Context):
-    for obj in context.view_layer.objects.selected:
-        if obj.type == 'MESH':
-            yield obj
+def get_coordinate_system_transform(forward_axis: str = 'X', up_axis: str = 'Z') -> Matrix:
+    forward = get_vector_from_axis_identifier(forward_axis)
+    up = get_vector_from_axis_identifier(up_axis)
+    left = up.cross(forward)
+    return Matrix((
+        (forward.x, forward.y, forward.z, 0.0),
+        (left.x, left.y, left.z, 0.0),
+        (up.x, up.y, up.z, 0.0),
+        (0.0, 0.0, 0.0, 1.0)
+    )).inverted()
 
 
-def get_armature_for_mesh_objects(mesh_objects: List[Object]) -> Optional[Object]:
+def get_mesh_objects_for_collection(collection: Collection) -> Iterable[DfsObject]:
+    return filter(lambda x: x.obj.type == 'MESH', dfs_collection_objects(collection))
+
+
+def get_mesh_objects_for_context(context: Context) -> Iterable[DfsObject]:
+    for dfs_object in dfs_view_layer_objects(context.view_layer):
+        if dfs_object.obj.type == 'MESH' and dfs_object.is_selected:
+            yield dfs_object
+
+
+def get_armature_for_mesh_objects(mesh_objects: Iterable[Object]) -> Optional[Object]:
     # Ensure that there are either no armature modifiers (static mesh) or that there is exactly one armature modifier
     # object shared between all meshes.
     armature_modifier_objects = set()
@@ -62,17 +90,14 @@ def get_armature_for_mesh_objects(mesh_objects: List[Object]) -> Optional[Object
         return None
 
 
-def _get_psk_input_objects(mesh_objects: List[Object]) -> PskInputObjects:
+def _get_psk_input_objects(mesh_objects: Iterable[DfsObject]) -> PskInputObjects:
+    mesh_objects = list(mesh_objects)
     if len(mesh_objects) == 0:
         raise RuntimeError('At least one mesh must be selected')
 
-    for mesh_object in mesh_objects:
-        if len(mesh_object.data.materials) == 0:
-            raise RuntimeError(f'Mesh "{mesh_object.name}" must have at least one material')
-
     input_objects = PskInputObjects()
     input_objects.mesh_objects = mesh_objects
-    input_objects.armature_object = get_armature_for_mesh_objects(mesh_objects)
+    input_objects.armature_object = get_armature_for_mesh_objects([x.obj for x in mesh_objects])
 
     return input_objects
 
@@ -83,7 +108,9 @@ def get_psk_input_objects_for_context(context: Context) -> PskInputObjects:
 
 
 def get_psk_input_objects_for_collection(collection: Collection, should_exclude_hidden_meshes: bool = True) -> PskInputObjects:
-    mesh_objects = list(get_mesh_objects_for_collection(collection, should_exclude_hidden_meshes))
+    mesh_objects = get_mesh_objects_for_collection(collection)
+    if should_exclude_hidden_meshes:
+        mesh_objects = filter(lambda x: x.is_visible, mesh_objects)
     return _get_psk_input_objects(mesh_objects)
 
 
@@ -100,6 +127,24 @@ def build_psk(context, input_objects: PskInputObjects, options: PskBuildOptions)
     psk = Psk()
     bones = []
 
+    def get_export_space_matrix():
+        match options.export_space:
+            case 'WORLD':
+                return Matrix.Identity(4)
+            case 'ARMATURE':
+                if armature_object is not None:
+                    return armature_object.matrix_world.inverted()
+                else:
+                    return Matrix.Identity(4)
+            case _:
+                raise ValueError(f'Invalid export space: {options.export_space}')
+
+    coordinate_system_matrix = get_coordinate_system_transform(options.forward_axis, options.up_axis)
+    coordinate_system_default_rotation = coordinate_system_matrix.to_quaternion()
+
+    export_space_matrix = get_export_space_matrix()  # TODO: maybe neutralize the scale here?
+    scale_matrix = coordinate_system_matrix @ Matrix.Scale(options.scale, 4)
+
     if armature_object is None or len(armature_object.data.bones) == 0:
         # If the mesh has no armature object or no bones, simply assign it a dummy bone at the root to satisfy the
         # requirement that a PSK file must have at least one bone.
@@ -109,16 +154,12 @@ def build_psk(context, input_objects: PskInputObjects, options: PskBuildOptions)
         psk_bone.children_count = 0
         psk_bone.parent_index = 0
         psk_bone.location = Vector3.zero()
-        psk_bone.rotation = Quaternion.identity()
+        psk_bone.rotation = coordinate_system_default_rotation
         psk.bones.append(psk_bone)
     else:
         bone_names = get_export_bone_names(armature_object, options.bone_filter_mode, options.bone_collection_indices)
         armature_data = typing.cast(Armature, armature_object.data)
         bones = [armature_data.bones[bone_name] for bone_name in bone_names]
-
-        # Check that all bone names are valid.
-        if options.should_enforce_bone_name_restrictions:
-            check_bone_names(map(lambda x: x.name, bones))
 
         for bone in bones:
             psk_bone = Psk.Bone()
@@ -144,12 +185,30 @@ def build_psk(context, input_objects: PskInputObjects, options: PskBuildOptions)
                 parent_tail = inverse_parent_rotation @ bone.parent.tail
                 location = (parent_tail - parent_head) + bone.head
             else:
-                armature_local_matrix = armature_object.matrix_local
+                def get_armature_local_matrix():
+                    match options.export_space:
+                        case 'WORLD':
+                            return armature_object.matrix_world
+                        case 'ARMATURE':
+                            return Matrix.Identity(4)
+                        case _:
+                            raise ValueError(f'Invalid export space: {options.export_space}')
+
+                armature_local_matrix = get_armature_local_matrix()
                 location = armature_local_matrix @ bone.head
                 bone_rotation = bone.matrix.to_quaternion().conjugated()
                 local_rotation = armature_local_matrix.to_3x3().to_quaternion().conjugated()
                 rotation = bone_rotation @ local_rotation
                 rotation.conjugate()
+                rotation = coordinate_system_default_rotation @ rotation
+
+            location = scale_matrix @ location
+
+            # If the armature object has been scaled, we need to scale the bone's location to match.
+            _, _, armature_object_scale = armature_object.matrix_world.decompose()
+            location.x *= armature_object_scale.x
+            location.y *= armature_object_scale.y
+            location.z *= armature_object_scale.z
 
             psk_bone.location.x = location.x
             psk_bone.location.y = location.y
@@ -174,22 +233,53 @@ def build_psk(context, input_objects: PskInputObjects, options: PskBuildOptions)
                                                                             material.psk.mesh_triangle_bit_flags)
         psk.materials.append(psk_material)
 
+    # TODO: This wasn't left in a good state. We should detect if we need to add a "default" material.
+    #  This can be done by checking if there is an empty material slot on any of the mesh objects, or if there are
+    #  no material slots on any of the mesh objects.
+    #  If so, it should be added to the end of the list of materials, and its index should mapped to a None value in the
+    #  material indices list.
+    if len(psk.materials) == 0:
+        # Add a default material if no materials are present.
+        psk_material = Psk.Material()
+        psk_material.name = bytes('None', encoding='windows-1252')
+        psk.materials.append(psk_material)
+
     context.window_manager.progress_begin(0, len(input_objects.mesh_objects))
 
     material_names = [m.name for m in options.materials]
 
     for object_index, input_mesh_object in enumerate(input_objects.mesh_objects):
 
+        obj, instance_objects, matrix_world = input_mesh_object.obj, input_mesh_object.instance_objects, input_mesh_object.matrix_world
+
         should_flip_normals = False
 
+        def get_material_name_indices(obj: Object, material_names: List[str]) -> Iterable[int]:
+            '''
+            Returns the index of the material in the list of material names.
+            If the material is not found, the index 0 is returned.
+            '''
+            for material_slot in obj.material_slots:
+                if material_slot.material is None:
+                    yield 0
+                else:
+                    try:
+                        yield material_names.index(material_slot.material.name)
+                    except ValueError:
+                        yield 0
+
         # MATERIALS
-        material_indices = [material_names.index(material_slot.material.name) for material_slot in input_mesh_object.material_slots]
+        material_indices = list(get_material_name_indices(obj, material_names))
+
+        if len(material_indices) == 0:
+            # Add a default material if no materials are present.
+            material_indices = [0]
 
         # MESH DATA
         match options.object_eval_state:
             case 'ORIGINAL':
-                mesh_object = input_mesh_object
-                mesh_data = input_mesh_object.data
+                mesh_object = obj
+                mesh_data = obj.data
             case 'EVALUATED':
                 # Create a copy of the mesh object after non-armature modifiers are applied.
 
@@ -202,14 +292,21 @@ def build_psk(context, input_objects: PskInputObjects, options: PskBuildOptions)
 
                 depsgraph = context.evaluated_depsgraph_get()
                 bm = bmesh.new()
-                bm.from_object(input_mesh_object, depsgraph)
+
+                try:
+                    bm.from_object(obj, depsgraph)
+                except ValueError:
+                    raise RuntimeError(f'Object "{obj.name}" is not evaluated.\n'
+                    'This is likely because the object is in a collection that has been excluded from the view layer.')
+
                 mesh_data = bpy.data.meshes.new('')
                 bm.to_mesh(mesh_data)
                 del bm
                 mesh_object = bpy.data.objects.new('', mesh_data)
-                mesh_object.matrix_world = input_mesh_object.matrix_world
+                mesh_object.matrix_world = matrix_world
 
-                scale = (input_mesh_object.scale.x, input_mesh_object.scale.y, input_mesh_object.scale.z)
+                # Extract the scale from the matrix.
+                _, _, scale = matrix_world.decompose()
 
                 # Negative scaling in Blender results in inverted normals after the scale is applied. However, if the scale
                 # is not applied, the normals will appear unaffected in the viewport. The evaluated mesh data used in the
@@ -222,19 +319,22 @@ def build_psk(context, input_objects: PskInputObjects, options: PskBuildOptions)
                 should_flip_normals = sum(1 for x in scale if x < 0) % 2 == 1
 
                 # Copy the vertex groups
-                for vertex_group in input_mesh_object.vertex_groups:
+                for vertex_group in obj.vertex_groups:
                     mesh_object.vertex_groups.new(name=vertex_group.name)
 
                 # Restore the previous pose position on the armature.
                 if old_pose_position is not None:
                     armature_object.data.pose_position = old_pose_position
+            case _:
+                raise ValueError(f'Invalid object evaluation state: {options.object_eval_state}')
 
         vertex_offset = len(psk.points)
+        matrix_world = scale_matrix @ export_space_matrix @ mesh_object.matrix_world
 
         # VERTICES
         for vertex in mesh_data.vertices:
             point = Vector3()
-            v = mesh_object.matrix_world @ vertex.co
+            v = matrix_world @ vertex.co
             point.x = v.x
             point.y = v.y
             point.z = v.z

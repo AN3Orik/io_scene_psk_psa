@@ -1,12 +1,13 @@
 import re
 import sys
 from fnmatch import fnmatch
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from bpy.props import BoolProperty, PointerProperty, EnumProperty, FloatProperty, CollectionProperty, IntProperty, \
     StringProperty
 from bpy.types import PropertyGroup, Object, Action, AnimData, Context
 
+from ...shared.data import bone_filter_mode_items
 from ...shared.types import PSX_PG_bone_collection_list_item
 
 
@@ -26,6 +27,15 @@ class PSA_PG_export_action_list_item(PropertyGroup):
     is_pose_marker: BoolProperty(options={'HIDDEN'})
 
 
+class PSA_PG_export_active_action_list_item(PropertyGroup):
+    action: PointerProperty(type=Action)
+    name: StringProperty()
+    armature_object: PointerProperty(type=Object)
+    is_selected: BoolProperty(default=True)
+    frame_start: IntProperty(options={'HIDDEN'})
+    frame_end: IntProperty(options={'HIDDEN'})
+
+
 class PSA_PG_export_timeline_markers(PropertyGroup):  # TODO: rename this to singular
     marker_index: IntProperty()
     name: StringProperty()
@@ -42,6 +52,20 @@ class PSA_PG_export_nla_strip_list_item(PropertyGroup):
     is_selected: BoolProperty(default=True)
 
 
+def get_sequences_from_name_and_frame_range(name: str, frame_start: int, frame_end: int) -> List[Tuple[str, int, int]]:
+    reversed_pattern = r'(.+)/(.+)'
+    reversed_match = re.match(reversed_pattern, name)
+    if reversed_match:
+        forward_name = reversed_match.group(1)
+        backwards_name = reversed_match.group(2)
+        return [
+            (forward_name, frame_start, frame_end),
+            (backwards_name, frame_end, frame_start)
+        ]
+    else:
+        return [(name, frame_start, frame_end)]
+
+
 def nla_track_update_cb(self: 'PSA_PG_export', context: Context) -> None:
     self.nla_strip_list.clear()
     match = re.match(r'^(\d+).+$', self.nla_track)
@@ -52,11 +76,12 @@ def nla_track_update_cb(self: 'PSA_PG_export', context: Context) -> None:
             return
         nla_track = animation_data.nla_tracks[self.nla_track_index]
         for nla_strip in nla_track.strips:
-            strip: PSA_PG_export_nla_strip_list_item = self.nla_strip_list.add()
-            strip.action = nla_strip.action
-            strip.name = nla_strip.name
-            strip.frame_start = nla_strip.frame_start
-            strip.frame_end = nla_strip.frame_end
+            for sequence_name, frame_start, frame_end in get_sequences_from_name_and_frame_range(nla_strip.name, nla_strip.frame_start, nla_strip.frame_end):
+                strip: PSA_PG_export_nla_strip_list_item = self.nla_strip_list.add()
+                strip.action = nla_strip.action
+                strip.name = sequence_name
+                strip.frame_start = frame_start
+                strip.frame_end = frame_end
 
 
 def get_animation_data(pg: 'PSA_PG_export', context: Context) -> Optional[AnimData]:
@@ -69,10 +94,9 @@ def get_animation_data(pg: 'PSA_PG_export', context: Context) -> Optional[AnimDa
 def nla_track_search_cb(self, context: Context, edit_text: str):
     pg = getattr(context.scene, 'psa_export')
     animation_data = get_animation_data(pg, context)
-    if animation_data is None:
-        return
-    for index, nla_track in enumerate(animation_data.nla_tracks):
-        yield f'{index} - {nla_track.name}'
+    if animation_data is not None:
+        for index, nla_track in enumerate(animation_data.nla_tracks):
+            yield f'{index} - {nla_track.name}'
 
 
 def animation_data_override_update_cb(self: 'PSA_PG_export', context: Context):
@@ -108,7 +132,8 @@ class PSA_PG_export(PropertyGroup):
         items=(
             ('ACTIONS', 'Actions', 'Sequences will be exported using actions', 'ACTION', 0),
             ('TIMELINE_MARKERS', 'Timeline Markers', 'Sequences are delineated by scene timeline markers', 'MARKER_HLT', 1),
-            ('NLA_TRACK_STRIPS', 'NLA Track Strips', 'Sequences are delineated by the start & end times of strips on the selected NLA track', 'NLA', 2)
+            ('NLA_TRACK_STRIPS', 'NLA Track Strips', 'Sequences are delineated by the start & end times of strips on the selected NLA track', 'NLA', 2),
+            ('ACTIVE_ACTION', 'Active Action', 'The active action will be exported for each selected armature', 'ACTION', 3),
         )
     )
     nla_track: StringProperty(
@@ -131,30 +156,32 @@ class PSA_PG_export(PropertyGroup):
     )
     fps_custom: FloatProperty(default=30.0, min=sys.float_info.epsilon, soft_min=1.0, options=empty_set, step=100,
                               soft_max=60.0)
+    compression_ratio_source: EnumProperty(
+        name='Compression Ratio Source',
+        options=empty_set,
+        description='',
+        items=(
+            ('ACTION_METADATA', 'Action Metadata', 'The compression ratio will be determined by action\'s Compression Ratio property found in the PSA Export panel.\n\nIf the Sequence Source is Timeline Markers, the lowest value of all contributing actions will be used', 'ACTION', 1),
+            ('CUSTOM', 'Custom', '', 2)
+        )
+    )
+    compression_ratio_custom: FloatProperty(default=1.0, min=0.0, max=1.0, subtype='FACTOR', description='The key sampling ratio of the exported sequence.\n\nA compression ratio of 1.0 will export all frames, while a compression ratio of 0.5 will export half of the frames')
     action_list: CollectionProperty(type=PSA_PG_export_action_list_item)
     action_list_index: IntProperty(default=0)
     marker_list: CollectionProperty(type=PSA_PG_export_timeline_markers)
     marker_list_index: IntProperty(default=0)
     nla_strip_list: CollectionProperty(type=PSA_PG_export_nla_strip_list_item)
     nla_strip_list_index: IntProperty(default=0)
+    active_action_list: CollectionProperty(type=PSA_PG_export_active_action_list_item)
+    active_action_list_index: IntProperty(default=0)
     bone_filter_mode: EnumProperty(
         name='Bone Filter',
         options=empty_set,
         description='',
-        items=(
-            ('ALL', 'All', 'All bones will be exported.'),
-            ('BONE_COLLECTIONS', 'Bone Collections', 'Only bones belonging to the selected bone collections and their '
-             'ancestors will be exported.'),
-        )
+        items=bone_filter_mode_items,
     )
     bone_collection_list: CollectionProperty(type=PSX_PG_bone_collection_list_item)
     bone_collection_list_index: IntProperty(default=0, name='', description='')
-    should_enforce_bone_name_restrictions: BoolProperty(
-        default=False,
-        name='Enforce Bone Name Restrictions',
-        description='Bone names restrictions will be enforced. Note that bone names without properly formatted names '
-                    'may not be able to be referenced in-engine'
-    )
     sequence_name_prefix: StringProperty(name='Prefix', options=empty_set)
     sequence_name_suffix: StringProperty(name='Suffix', options=empty_set)
     sequence_filter_name: StringProperty(
@@ -182,6 +209,13 @@ class PSA_PG_export(PropertyGroup):
         options=empty_set,
         name='Show Reversed',
         description='Show reversed sequences'
+    )
+    scale: FloatProperty(
+        name='Scale',
+        default=1.0,
+        description='Scale factor to apply to the bone translations. Use this if you are exporting animations for a scaled PSK mesh',
+        min=0.0,
+        soft_max=100.0
     )
 
 
@@ -222,5 +256,6 @@ classes = (
     PSA_PG_export_action_list_item,
     PSA_PG_export_timeline_markers,
     PSA_PG_export_nla_strip_list_item,
+    PSA_PG_export_active_action_list_item,
     PSA_PG_export,
 )
